@@ -2,7 +2,8 @@
 require("dotenv/config");
 const express = require("express");
 const cors = require("cors");
-const { OpenAIClient, AzureKeyCredential } = require("@azure/openai");
+const { OpenAIClient } = require("@azure/openai");
+const { AzureKeyCredential } = require("@azure/core-auth"); // ✅ FIXED
 
 const app = express();
 app.use(cors());
