@@ -1,65 +1,82 @@
-require("dotenv/config");
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const OpenAIClient = require("@azure/openai").OpenAIClient;
-const { AzureKeyCredential } = require("@azure/core-auth");
+const { AzureOpenAI } = require("openai");
 
 const app = express();
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
-const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
-const apiKey = process.env.AZURE_OPENAI_KEY;
-const assistantId = process.env.ASSISTANT_ID;
+const client = new AzureOpenAI({
+  apiKey: process.env.AZURE_OPENAI_KEY,
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+  apiVersion: "2024-05-01-preview",
+});
 
-if (!endpoint || !apiKey || !assistantId) {
-  throw new Error("Please set AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, and ASSISTANT_ID in your .env file.");
-}
-
-const client = new OpenAIClient(endpoint, new AzureKeyCredential(apiKey));
-
-let threadId = null;
+const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "Message is required" });
 
   try {
-    if (!threadId) {
-      const thread = await client.createThread();
-      threadId = thread.id;
-    }
+    const thread = await client.beta.threads.create();
 
-    await client.createMessage(threadId, {
+    await client.beta.threads.messages.create(thread.id, {
       role: "user",
       content: message,
     });
 
-    const run = await client.createRun(threadId, { assistantId });
+    let run = await client.beta.threads.runs.create(thread.id, {
+      assistant_id: ASSISTANT_ID,
+    });
 
     let runStatus = run.status;
+
     while (runStatus === "queued" || runStatus === "in_progress") {
       await new Promise((r) => setTimeout(r, 1000));
-      const statusRes = await client.getRun(threadId, run.id);
-      runStatus = statusRes.status;
+      const statusCheck = await client.beta.threads.runs.retrieve(thread.id, run.id);
+      runStatus = statusCheck.status;
+
+      if (statusCheck.required_action?.type === "submit_tool_outputs") {
+        const toolCalls = statusCheck.required_action.submit_tool_outputs.tool_calls;
+
+        const toolOutputs = toolCalls.map((call) => {
+          if (call.function.name === "get_this_weeks_assignments") {
+            return {
+              tool_call_id: call.id,
+              output: JSON.stringify([
+                { title: "ENGR Homework 4", due: "2025-04-10T23:59:00" },
+                { title: "MA 221 Quiz", due: "2025-04-12T09:00:00" },
+              ]),
+            };
+          }
+          return {
+            tool_call_id: call.id,
+            output: "Not implemented yet.",
+          };
+        });
+
+        await client.beta.threads.runs.submitToolOutputs(thread.id, run.id, {
+          tool_outputs: toolOutputs,
+        });
+
+        runStatus = "in_progress";
+        while (runStatus === "queued" || runStatus === "in_progress") {
+          await new Promise((r) => setTimeout(r, 1000));
+          const runCheck = await client.beta.threads.runs.retrieve(thread.id, run.id);
+          runStatus = runCheck.status;
+        }
+      }
     }
 
-    if (runStatus !== "completed") {
-      return res.json({ response: "Assistant didn't complete the task. 😕" });
-    }
+    const messages = await client.beta.threads.messages.list(thread.id);
+    const lastMessage = messages.data.find((msg) => msg.role === "assistant");
 
-    const messages = await client.listMessages(threadId);
-    const lastMessage = messages.data.find((m) => m.role === "assistant");
-
-    if (!lastMessage || !lastMessage.content?.length) {
-      return res.json({ response: "No reply 😕" });
-    }
-
-    const reply = lastMessage.content[0].text.value;
-    res.json({ response: reply });
-
-  } catch (error) {
-    console.error("Assistant error:", error);
+    res.json({
+      response: lastMessage?.content?.[0]?.text?.value || "Still no reply 😕",
+    });
+  } catch (err) {
+    console.error("❌ Error:", err);
     res.status(500).json({ response: "Something went wrong. 😕" });
   }
 });
