@@ -1,7 +1,7 @@
 require("dotenv/config");
 const express = require("express");
 const cors = require("cors");
-const OpenAIClient = require("@azure/openai").default; // ✅ correct default import
+const OpenAIClient = require("@azure/openai").OpenAIClient;
 const { AzureKeyCredential } = require("@azure/core-auth");
 
 const app = express();
