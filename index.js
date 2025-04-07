@@ -1,9 +1,8 @@
-// index.js
 require("dotenv/config");
 const express = require("express");
 const cors = require("cors");
-const { OpenAIClient } = require("@azure/openai");
-const { AzureKeyCredential } = require("@azure/core-auth"); // ✅ FIXED
+const OpenAIClient = require("@azure/openai").default; // ✅ correct default import
+const { AzureKeyCredential } = require("@azure/core-auth");
 
 const app = express();
 app.use(cors());
@@ -19,14 +18,13 @@ if (!endpoint || !apiKey || !assistantId) {
 
 const client = new OpenAIClient(endpoint, new AzureKeyCredential(apiKey));
 
-let threadId = null; // Keep a thread alive to hold state
+let threadId = null;
 
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "Message is required" });
 
   try {
-    // Create thread once
     if (!threadId) {
       const thread = await client.createThread();
       threadId = thread.id;
@@ -37,11 +35,8 @@ app.post("/chat", async (req, res) => {
       content: message,
     });
 
-    const run = await client.createRun(threadId, {
-      assistantId: assistantId,
-    });
+    const run = await client.createRun(threadId, { assistantId });
 
-    // Poll until run completes
     let runStatus = run.status;
     while (runStatus === "queued" || runStatus === "in_progress") {
       await new Promise((r) => setTimeout(r, 1000));
@@ -62,13 +57,14 @@ app.post("/chat", async (req, res) => {
 
     const reply = lastMessage.content[0].text.value;
     res.json({ response: reply });
+
   } catch (error) {
     console.error("Assistant error:", error);
     res.status(500).json({ response: "Something went wrong. 😕" });
   }
 });
 
-const PORT = process.env.PORT || 8080; // <-- must match Azure's expectations
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
