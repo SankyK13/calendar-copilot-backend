@@ -1,102 +1,148 @@
-const BACKEND_URL = "https://calendar-copilot-backend-sankalpkhira-c2dcbcfvf3gdcrad.eastus2-01.azurewebsites.net";
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const { AzureOpenAI } = require("openai");
+const multer = require("multer");
+const pdfParse = require("pdf-parse");
 
-// Global variable to store the conversation thread id
-let currentThreadId = null;
+const app = express();
+app.use(express.json());
+app.use(cors());
 
-export function toggleCopilot() {
-  const el = document.getElementById("copilot-container");
-  el.classList.toggle("hidden");
-}
+// Configure multer to use memory storage
+const upload = multer({ storage: multer.memoryStorage() });
 
-export async function sendToCopilot() {
-  const input = document.getElementById("copilot-input");
-  const text = input.value.trim();
-  if (!text) return;
+const client = new AzureOpenAI({
+  apiKey: process.env.AZURE_OPENAI_KEY,
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+  apiVersion: "2024-05-01-preview",
+});
 
-  const messages = document.getElementById("copilot-messages");
-  messages.innerHTML += `<div class="user">🧑‍💻 ${text}</div>`;
-  input.value = "";
+const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
-  try {
-    // Include the currentThreadId in the request to persist the conversation thread
-    const res = await fetch(`${BACKEND_URL}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, threadId: currentThreadId })
-    });
-
-    const data = await res.json();
-
-    // Update the thread id if returned from the backend
-    if (data.threadId) {
-      currentThreadId = data.threadId;
-    }
-
-    if (data.response) {
-      messages.innerHTML += `<div class="assistant">🤖 ${data.response}</div>`;
-    } else {
-      messages.innerHTML += `<div class="assistant error">🤖 No response received.</div>`;
-    }
-
-    if (data.events) {
-      // Dispatch the events extracted from the PDF (if any)
-      document.dispatchEvent(new CustomEvent("copilot-events", { detail: data.events }));
-    }
-  } catch (err) {
-    messages.innerHTML += `<div class="assistant error">❌ Error: ${err.message}</div>`;
-    console.error("Error sending chat message:", err);
-  }
-
-  messages.scrollTop = messages.scrollHeight;
-}
-
-export async function handleFileUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const messages = document.getElementById("copilot-messages");
-
-  messages.innerHTML += `<div class="user">🧑‍💻 Uploaded file: ${file.name}</div>`;
-  
-  if (file.type !== "application/pdf") {
-    messages.innerHTML += `<div class="assistant error">🤖 Please upload a valid PDF file.</div>`;
-    return;
-  }
-  
-  const formData = new FormData();
-  formData.append("file", file);
+app.post("/chat", async (req, res) => {
+  const { message, threadId } = req.body;
+  let thread;
 
   try {
-    const res = await fetch(`${BACKEND_URL}/upload`, {
-      method: "POST",
-      body: formData
-    });
-    
-    // For debugging: log raw response text
-    const rawResponse = await res.text();
-    console.log("Raw upload response:", rawResponse);
-    
-    let data;
-    try {
-      data = JSON.parse(rawResponse);
-    } catch (e) {
-      throw new Error("Backend did not return valid JSON.");
-    }
-    
-    // Check for data.message and display it
-    if (data.message) {
-      messages.innerHTML += `<div class="assistant">🤖 ${data.message}</div>`;
+    // Reuse thread if provided, otherwise create new one.
+    if (threadId) {
+      thread = { id: threadId };
     } else {
-      messages.innerHTML += `<div class="assistant error">🤖 No response received for PDF upload.</div>`;
+      thread = await client.beta.threads.create();
+    }
+
+    // Add user's message to thread
+    await client.beta.threads.messages.create(thread.id, {
+      role: "user",
+      content: message,
+    });
+
+    let run = await client.beta.threads.runs.create(thread.id, {
+      assistant_id: ASSISTANT_ID,
+    });
+    let runStatus = run.status;
+
+    while (runStatus === "queued" || runStatus === "in_progress") {
+      await new Promise((r) => setTimeout(r, 1000));
+      const statusCheck = await client.beta.threads.runs.retrieve(thread.id, run.id);
+      runStatus = statusCheck.status;
+
+      if (statusCheck.required_action?.type === "submit_tool_outputs") {
+        const toolCalls = statusCheck.required_action.submit_tool_outputs.tool_calls;
+        const toolOutputs = toolCalls.map((call) => {
+          if (call.function.name === "get_this_weeks_assignments") {
+            return {
+              tool_call_id: call.id,
+              output: JSON.stringify([
+                { title: "ENGR Homework 4", due: "2025-04-10T23:59:00" },
+                { title: "MA 221 Quiz", due: "2025-04-12T09:00:00" },
+              ]),
+            };
+          }
+          return {
+            tool_call_id: call.id,
+            output: "Not implemented yet.",
+          };
+        });
+        await client.beta.threads.runs.submitToolOutputs(thread.id, run.id, {
+          tool_outputs: toolOutputs,
+        });
+
+        runStatus = "in_progress";
+        while (runStatus === "queued" || runStatus === "in_progress") {
+          await new Promise((r) => setTimeout(r, 1000));
+          const runCheck = await client.beta.threads.runs.retrieve(thread.id, run.id);
+          runStatus = runCheck.status;
+        }
+      }
+    }
+
+    const messagesData = await client.beta.threads.messages.list(thread.id);
+    const lastAssistantMessage = messagesData.data.find((msg) => msg.role === "assistant");
+
+    res.json({
+      response: lastAssistantMessage?.content?.[0]?.text?.value || "Still no reply 😕",
+      threadId: thread.id,
+    });
+  } catch (err) {
+    console.error("❌ Error:", err);
+    res.status(500).json({ response: "Something went wrong. 😕" });
+  }
+});
+
+// New /upload endpoint for PDF uploads
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      console.error("No file received.");
+      return res.status(400).json({ status: "error", message: "No file uploaded." });
+    }
+    if (req.file.mimetype !== "application/pdf") {
+      console.error("Invalid file type:", req.file.mimetype);
+      return res.status(400).json({ status: "error", message: "Only PDF files are accepted." });
     }
     
-    // Dispatch custom event with the extracted events (optional)
-    if (data.events) {
-      document.dispatchEvent(new CustomEvent("copilot-events", { detail: data.events }));
-    }
+    const pdfData = await pdfParse(req.file.buffer);
+    console.log("PDF text extracted:", pdfData.text.substring(0, 100));
+    
+    // Extract events from the PDF text with a placeholder function
+    const extractedEvents = extractEventsFromPDF(pdfData.text);
+    
+    // Create a summary string of the events
+    const eventSummaries = extractedEvents
+      .map((evt, i) => `${i + 1}. ${evt.title}`)
+      .join("\n");
+    
+    res.json({
+      status: "success",
+      message: `I found ${extractedEvents.length} events in the uploaded PDF:\n${eventSummaries}`,
+      events: extractedEvents,
+    });
   } catch (err) {
-    messages.innerHTML += `<div class="assistant error">❌ Error: ${err.message}</div>`;
-    console.error("Error during PDF upload:", err);
+    console.error("PDF processing error:", err);
+    res.status(500).json({ status: "error", message: "Failed to process the PDF." });
   }
-  
-  messages.scrollTop = messages.scrollHeight;
+});
+
+// Placeholder function to extract events from PDF text.
+// Replace the extraction logic as needed.
+function extractEventsFromPDF(text) {
+  const events = [];
+  const lines = text.split("\n");
+  lines.forEach(line => {
+    if (line.toLowerCase().includes("exam") || line.toLowerCase().includes("assignment")) {
+      events.push({
+        title: line.trim(),
+        start: "2025-04-01T09:00:00", // Placeholder value
+        end: "2025-04-01T11:00:00"    // Placeholder value
+      });
+    }
+  });
+  return events;
 }
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
