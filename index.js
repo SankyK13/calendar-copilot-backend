@@ -2,10 +2,15 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { AzureOpenAI } = require("openai");
+const multer = require("multer");
+const pdfParse = require("pdf-parse"); // Import pdf-parse
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+
+// Setup multer storage (using memory storage so you get the file as a buffer)
+const upload = multer({ storage: multer.memoryStorage() });
 
 const client = new AzureOpenAI({
   apiKey: process.env.AZURE_OPENAI_KEY,
@@ -80,6 +85,58 @@ app.post("/chat", async (req, res) => {
     res.status(500).json({ response: "Something went wrong. 😕" });
   }
 });
+
+// NEW: PDF Upload Endpoint
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    // Ensure the file was provided
+    if (!req.file) {
+      return res.status(400).json({ status: "error", message: "No file uploaded." });
+    }
+
+    // Check file type if needed (optional)
+    if (req.file.mimetype !== "application/pdf") {
+      return res.status(400).json({ status: "error", message: "Only PDF files are accepted." });
+    }
+
+    // Parse the PDF
+    const pdfBuffer = req.file.buffer;
+    const pdfData = await pdfParse(pdfBuffer);
+
+    // Here, you need to extract the event details from pdfData.text.
+    // For now, we'll simulate this extraction:
+    const extractedEvents = extractEventsFromPDF(pdfData.text);
+
+    // Return a success message along with the extracted events
+    res.json({
+      status: "success",
+      message: `I found ${extractedEvents.length} events in the uploaded PDF.`,
+      events: extractedEvents,
+    });
+  } catch (err) {
+    console.error("PDF processing error:", err);
+    res.status(500).json({ status: "error", message: "Failed to process the PDF." });
+  }
+});
+
+// Example function to extract events from the parsed PDF text.
+// You'll want to customize this to fit your syllabus format.
+function extractEventsFromPDF(text) {
+  // This is a simple placeholder extraction
+  // In a real implementation, you might use regex or NLP to extract dates and event titles.
+  const events = [];
+  const lines = text.split("\n");
+  lines.forEach((line) => {
+    if (line.toLowerCase().includes("exam") || line.toLowerCase().includes("assignment")) {
+      events.push({
+        title: line.trim(),
+        start: "2025-04-01T09:00:00", // Replace with actual extracted date/time
+        end: "2025-04-01T11:00:00",   // Replace with actual extracted date/time
+      });
+    }
+  });
+  return events;
+}
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
