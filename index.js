@@ -2,15 +2,10 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { AzureOpenAI } = require("openai");
-const multer = require("multer");
-const pdfParse = require("pdf-parse"); // Import pdf-parse
 
 const app = express();
 app.use(express.json());
 app.use(cors());
-
-// Setup multer storage (using memory storage so you get the file as a buffer)
-const upload = multer({ storage: multer.memoryStorage() });
 
 const client = new AzureOpenAI({
   apiKey: process.env.AZURE_OPENAI_KEY,
@@ -21,22 +16,31 @@ const client = new AzureOpenAI({
 const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
 app.post("/chat", async (req, res) => {
-  const { message } = req.body;
+  // Now we expect the request body to include message and an optional threadId
+  const { message, threadId } = req.body;
+  let thread;
 
   try {
-    const thread = await client.beta.threads.create();
+    // If a threadId is provided, use it; otherwise, create a new thread
+    if (threadId) {
+      thread = { id: threadId };
+    } else {
+      thread = await client.beta.threads.create();
+    }
 
+    // Add the user's message to the thread
     await client.beta.threads.messages.create(thread.id, {
       role: "user",
       content: message,
     });
 
+    // Create a run for the thread to get the assistant's reply
     let run = await client.beta.threads.runs.create(thread.id, {
       assistant_id: ASSISTANT_ID,
     });
-
     let runStatus = run.status;
 
+    // Wait for the run to finish, handling any tool call submissions as before
     while (runStatus === "queued" || runStatus === "in_progress") {
       await new Promise((r) => setTimeout(r, 1000));
       const statusCheck = await client.beta.threads.runs.retrieve(thread.id, run.id);
@@ -44,7 +48,6 @@ app.post("/chat", async (req, res) => {
 
       if (statusCheck.required_action?.type === "submit_tool_outputs") {
         const toolCalls = statusCheck.required_action.submit_tool_outputs.tool_calls;
-
         const toolOutputs = toolCalls.map((call) => {
           if (call.function.name === "get_this_weeks_assignments") {
             return {
@@ -60,7 +63,6 @@ app.post("/chat", async (req, res) => {
             output: "Not implemented yet.",
           };
         });
-
         await client.beta.threads.runs.submitToolOutputs(thread.id, run.id, {
           tool_outputs: toolOutputs,
         });
@@ -74,69 +76,20 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    const messages = await client.beta.threads.messages.list(thread.id);
-    const lastMessage = messages.data.find((msg) => msg.role === "assistant");
+    // Get the thread messages and find the latest assistant response
+    const messagesData = await client.beta.threads.messages.list(thread.id);
+    const lastAssistantMessage = messagesData.data.find((msg) => msg.role === "assistant");
 
+    // Return the response along with the current thread id
     res.json({
-      response: lastMessage?.content?.[0]?.text?.value || "Still no reply 😕",
+      response: lastAssistantMessage?.content?.[0]?.text?.value || "Still no reply 😕",
+      threadId: thread.id,
     });
   } catch (err) {
     console.error("❌ Error:", err);
     res.status(500).json({ response: "Something went wrong. 😕" });
   }
 });
-
-// NEW: PDF Upload Endpoint
-app.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    // Ensure the file was provided
-    if (!req.file) {
-      return res.status(400).json({ status: "error", message: "No file uploaded." });
-    }
-
-    // Check file type if needed (optional)
-    if (req.file.mimetype !== "application/pdf") {
-      return res.status(400).json({ status: "error", message: "Only PDF files are accepted." });
-    }
-
-    // Parse the PDF
-    const pdfBuffer = req.file.buffer;
-    const pdfData = await pdfParse(pdfBuffer);
-
-    // Here, you need to extract the event details from pdfData.text.
-    // For now, we'll simulate this extraction:
-    const extractedEvents = extractEventsFromPDF(pdfData.text);
-
-    // Return a success message along with the extracted events
-    res.json({
-      status: "success",
-      message: `I found ${extractedEvents.length} events in the uploaded PDF.`,
-      events: extractedEvents,
-    });
-  } catch (err) {
-    console.error("PDF processing error:", err);
-    res.status(500).json({ status: "error", message: "Failed to process the PDF." });
-  }
-});
-
-// Example function to extract events from the parsed PDF text.
-// You'll want to customize this to fit your syllabus format.
-function extractEventsFromPDF(text) {
-  // This is a simple placeholder extraction
-  // In a real implementation, you might use regex or NLP to extract dates and event titles.
-  const events = [];
-  const lines = text.split("\n");
-  lines.forEach((line) => {
-    if (line.toLowerCase().includes("exam") || line.toLowerCase().includes("assignment")) {
-      events.push({
-        title: line.trim(),
-        start: "2025-04-01T09:00:00", // Replace with actual extracted date/time
-        end: "2025-04-01T11:00:00",   // Replace with actual extracted date/time
-      });
-    }
-  });
-  return events;
-}
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
