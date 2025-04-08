@@ -25,24 +25,26 @@ app.post("/chat", async (req, res) => {
   let thread;
 
   try {
-    // Reuse thread if provided, otherwise create new one.
+    // Reuse an existing thread or create a new one
     if (threadId) {
       thread = { id: threadId };
     } else {
       thread = await client.beta.threads.create();
     }
 
-    // Add user's message to thread
+    // Add the user's message to the thread
     await client.beta.threads.messages.create(thread.id, {
       role: "user",
       content: message,
     });
 
+    // Create a run to get the assistant's reply
     let run = await client.beta.threads.runs.create(thread.id, {
       assistant_id: ASSISTANT_ID,
     });
     let runStatus = run.status;
 
+    // Poll until the run is finished
     while (runStatus === "queued" || runStatus === "in_progress") {
       await new Promise((r) => setTimeout(r, 1000));
       const statusCheck = await client.beta.threads.runs.retrieve(thread.id, run.id);
@@ -51,6 +53,7 @@ app.post("/chat", async (req, res) => {
       if (statusCheck.required_action?.type === "submit_tool_outputs") {
         const toolCalls = statusCheck.required_action.submit_tool_outputs.tool_calls;
         const toolOutputs = toolCalls.map((call) => {
+          // Handle the "get_this_weeks_assignments" function
           if (call.function.name === "get_this_weeks_assignments") {
             return {
               tool_call_id: call.id,
@@ -60,11 +63,32 @@ app.post("/chat", async (req, res) => {
               ]),
             };
           }
+          // Handle the "add_events" function call for chat-based event creation
+          else if (call.function.name === "add_events") {
+            let eventDetails;
+            try {
+              eventDetails = JSON.parse(call.function.arguments);
+            } catch (e) {
+              eventDetails = null;
+            }
+            // Here you would normally persist the event(s); for this example, we simulate success.
+            return {
+              tool_call_id: call.id,
+              output: JSON.stringify({
+                status: "success",
+                message: "Your event has been added.",
+                events: eventDetails ? [eventDetails] : []
+              }),
+            };
+          }
+          // Default response for any other functions not implemented
           return {
             tool_call_id: call.id,
             output: "Not implemented yet.",
           };
         });
+
+        // Submit the tool outputs to complete the run
         await client.beta.threads.runs.submitToolOutputs(thread.id, run.id, {
           tool_outputs: toolOutputs,
         });
@@ -78,6 +102,7 @@ app.post("/chat", async (req, res) => {
       }
     }
 
+    // Retrieve messages from the thread and find the last assistant message
     const messagesData = await client.beta.threads.messages.list(thread.id);
     const lastAssistantMessage = messagesData.data.find((msg) => msg.role === "assistant");
 
@@ -106,10 +131,10 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const pdfData = await pdfParse(req.file.buffer);
     console.log("PDF text extracted:", pdfData.text.substring(0, 100));
     
-    // Extract events from the PDF text with a placeholder function
+    // Extract events from the PDF using a placeholder function (update this with your own logic)
     const extractedEvents = extractEventsFromPDF(pdfData.text);
     
-    // Create a summary string of the events
+    // Create a summary string of event titles
     const eventSummaries = extractedEvents
       .map((evt, i) => `${i + 1}. ${evt.title}`)
       .join("\n");
@@ -125,8 +150,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// Placeholder function to extract events from PDF text.
-// Replace the extraction logic as needed.
+// Placeholder function: extract events from PDF text.
+// Replace this with your actual extraction logic.
 function extractEventsFromPDF(text) {
   const events = [];
   const lines = text.split("\n");
